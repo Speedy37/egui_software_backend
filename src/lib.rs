@@ -22,6 +22,8 @@ use crate::{
 pub(crate) mod color;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod color_avx2;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod color_avx512bw;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod color_neon;
 #[cfg(target_arch = "x86_64")]
@@ -58,6 +60,15 @@ pub(crate) fn sse41() -> bool {
 pub(crate) fn avx2() -> bool {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     return std::arch::is_x86_feature_detected!("avx2");
+    #[cfg(any(not(target_arch = "x86_64"), not(feature = "std")))]
+    return false;
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub(crate) fn avx512bw() -> bool {
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    return std::arch::is_x86_feature_detected!("avx512bw");
     #[cfg(any(not(target_arch = "x86_64"), not(feature = "std")))]
     return false;
 }
@@ -353,7 +364,12 @@ impl EguiSoftwareRender {
             };
         }
 
-        if avx2() {
+        if avx512bw() {
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                blit_tile_impl!(color_avx512bw)
+            };
+        } else if avx2() {
             #[cfg(target_arch = "x86_64")]
             unsafe {
                 blit_tile_impl!(color_avx2)
