@@ -92,7 +92,7 @@ pub enum ColorFieldOrder {
     Bgra,
 }
 
-pub struct EguiSoftwareRender {
+struct EguiSoftwareRenderInner {
     textures: HashMap<egui::TextureId, EguiTexture>,
     cached_primitives: HashMap<u32, CachedPrimitive>,
     tiles_dim: [usize; 2],
@@ -100,7 +100,6 @@ pub struct EguiSoftwareRender {
     target_size: Vec2,
     prims_updated_this_frame: usize,
     output_field_order: ColorFieldOrder,
-    canvas: Canvas,
     redraw_everything_this_frame: bool,
     convert_tris_to_rects: bool,
     allow_raster_opt: bool,
@@ -109,40 +108,47 @@ pub struct EguiSoftwareRender {
     pub stats: RasterStats,
 }
 
-impl EguiSoftwareRender {
+pub struct EguiSoftwareRender<C: Canvas = CanvasVec> {
+    canvas: C,
+    inner: EguiSoftwareRenderInner,
+}
+
+impl<C: Canvas> EguiSoftwareRender<C> {
     /// # Arguments
     /// * `output_field_order` - egui textures and vertex colors will be swizzled before rendering to match the desired
     ///   output buffer order.
-    pub fn new(output_field_order: ColorFieldOrder) -> Self {
+    pub fn new(output_field_order: ColorFieldOrder, canvas: C) -> Self {
         EguiSoftwareRender {
-            textures: Default::default(),
-            cached_primitives: Default::default(),
-            tiles_dim: Default::default(),
-            dirty_tiles: Default::default(),
-            target_size: Default::default(),
-            prims_updated_this_frame: Default::default(),
-            output_field_order,
-            canvas: Default::default(),
-            redraw_everything_this_frame: Default::default(),
-            convert_tris_to_rects: true,
-            allow_raster_opt: true,
-            cacheing_enabled: true,
-            #[cfg(feature = "raster_stats")]
-            stats: Default::default(),
+            canvas,
+            inner: EguiSoftwareRenderInner {
+                textures: Default::default(),
+                cached_primitives: Default::default(),
+                tiles_dim: Default::default(),
+                dirty_tiles: Default::default(),
+                target_size: Default::default(),
+                prims_updated_this_frame: Default::default(),
+                output_field_order,
+                redraw_everything_this_frame: Default::default(),
+                convert_tris_to_rects: true,
+                allow_raster_opt: true,
+                cacheing_enabled: true,
+                #[cfg(feature = "raster_stats")]
+                stats: Default::default(),
+            },
         }
     }
 
     /// If true: attempts to optimize by converting suitable triangle pairs into rectangles for faster rendering.
     ///   Things *should* look the same with this set to `true` while rendering faster.
     pub fn with_convert_tris_to_rects(mut self, set: bool) -> Self {
-        self.convert_tris_to_rects = set;
+        self.inner.convert_tris_to_rects = set;
         self
     }
 
     /// If false: Rasterize everything with triangles, always calculate vertex colors, uvs, use bilinear
     ///   everywhere, etc... Things *should* look the same with this set to `true` while rendering faster.
     pub fn with_allow_raster_opt(mut self, set: bool) -> Self {
-        self.allow_raster_opt = set;
+        self.inner.allow_raster_opt = set;
         self
     }
 
@@ -150,7 +156,7 @@ impl EguiSoftwareRender {
     /// then rendered over the frame buffer. If false ClippedPrimitives are rendered directly to the frame buffer.
     /// Rendering without caching is much slower and primarily intended for testing.
     pub fn with_caching(mut self, set: bool) -> Self {
-        self.cacheing_enabled = set;
+        self.inner.cacheing_enabled = set;
         self
     }
 
@@ -170,7 +176,7 @@ impl EguiSoftwareRender {
         textures_delta: &egui::TexturesDelta,
         pixels_per_point: f32,
     ) {
-        if self.cacheing_enabled {
+        if self.inner.cacheing_enabled {
             self.render_to_canvas(
                 buffer_ref.width,
                 buffer_ref.height,
@@ -178,9 +184,12 @@ impl EguiSoftwareRender {
                 textures_delta,
                 pixels_per_point,
             );
-            self.blit_canvas_to_buffer(buffer_ref);
+            let mut canvas_buffer = self.canvas.buffer_mut();
+            let canvas = &canvas_buffer.buffer_mut_ref();
+            self.inner.blit_canvas_to_buffer(canvas, buffer_ref);
         } else {
-            self.render_direct(buffer_ref, paint_jobs, textures_delta, pixels_per_point);
+            self.inner
+                .render_direct(buffer_ref, paint_jobs, textures_delta, pixels_per_point);
         }
     }
 
@@ -192,6 +201,9 @@ impl EguiSoftwareRender {
     /// * `paint_jobs` - List of `egui::ClippedPrimitive` from egui to be rendered.
     /// * `textures_delta` - The change in egui textures since last frame
     /// * `pixels_per_point` - The number of physical pixels for each logical point.
+    ///
+    /// # Returns
+    /// * Some canvas buffer if the canvas was altered
     pub fn render_to_canvas(
         &mut self,
         width: usize,
@@ -199,7 +211,40 @@ impl EguiSoftwareRender {
         paint_jobs: &[egui::ClippedPrimitive],
         textures_delta: &egui::TexturesDelta,
         pixels_per_point: f32,
-    ) {
+    ) -> Option<C::Buffer<'_>> {
+        if self.inner.cacheing_enabled {
+            self.inner.render_with_caching_to_canvas(
+                &mut self.canvas,
+                width,
+                height,
+                paint_jobs,
+                textures_delta,
+                pixels_per_point,
+            )
+        } else {
+            self.canvas.resize_and_clear(width, height);
+            let mut canvas_buffer = self.canvas.buffer_mut();
+            self.inner.render_direct(
+                &mut canvas_buffer.buffer_mut_ref(),
+                paint_jobs,
+                textures_delta,
+                pixels_per_point,
+            );
+            Some(canvas_buffer)
+        }
+    }
+}
+
+impl EguiSoftwareRenderInner {
+    fn render_with_caching_to_canvas<'a, C: Canvas>(
+        &mut self,
+        canvas: &'a mut C,
+        width: usize,
+        height: usize,
+        paint_jobs: &[egui::ClippedPrimitive],
+        textures_delta: &egui::TexturesDelta,
+        pixels_per_point: f32,
+    ) -> Option<C::Buffer<'a>> {
         // TODO: need to deal with user textures. Either make the fields of EguiUserTextures pub or need to come up with a replacement.
 
         #[cfg(feature = "raster_stats")]
@@ -209,10 +254,9 @@ impl EguiSoftwareRender {
         assert!(height > 0);
         assert!(pixels_per_point > 0.0);
 
-        self.redraw_everything_this_frame = self.canvas.resize(width, height);
+        self.redraw_everything_this_frame = canvas.resize_and_clear(width, height);
 
         if self.redraw_everything_this_frame {
-            self.canvas.clear();
             self.cached_primitives.clear();
         }
 
@@ -237,17 +281,20 @@ impl EguiSoftwareRender {
             reinit_canvas = true;
         }
 
-        if reinit_canvas {
-            self.update_canvas_from_cached();
-        }
-
         self.free_textures(textures_delta);
+        if reinit_canvas {
+            let mut canvas_buffer = canvas.buffer_mut();
+            self.update_canvas_from_cached(canvas_buffer.buffer_mut_ref());
+            Some(canvas_buffer)
+        } else {
+            None
+        }
     }
 
     /// Draw canvas alpha over given buffer.
     /// Only run after EguiSoftwareRender::render_to_canvas(), or use EguiSoftwareRender::render() to run both.
     /// Only writes tile regions that contain pixels that are not fully transparent.
-    pub fn blit_canvas_to_buffer(&mut self, buffer: &mut BufferMutRef) {
+    fn blit_canvas_to_buffer(&mut self, canvas: &BufferMutRef, buffer: &mut BufferMutRef) {
         #[cfg(feature = "raster_stats")]
         let start = std::time::Instant::now();
 
@@ -256,7 +303,7 @@ impl EguiSoftwareRender {
         //     *pixel = egui_blend_u8(*src, *pixel);
         // });
 
-        if self.canvas.data.is_empty() {
+        if canvas.data.is_empty() {
             #[cfg(feature = "log")]
             log::error!(
                 "Canvas not initialized, call EguiSoftwareRender::blit_canvas_to_buffer() only after EguiSoftwareRender::render_to_canvas()"
@@ -264,9 +311,9 @@ impl EguiSoftwareRender {
             return;
         }
 
-        let width = self.canvas.width;
-        let height = self.canvas.height;
-        assert_eq!(self.canvas.data.len(), width * height);
+        let width = canvas.width;
+        let height = canvas.height;
+        assert_eq!(canvas.data.len(), width * height);
         assert_eq!(buffer.data.len(), width * height);
 
         let tiles_x = self.tiles_dim[0];
@@ -291,7 +338,7 @@ impl EguiSoftwareRender {
                     let buffer_tile_row = &mut BufferMutRef::new(tile_height_row, width, height);
 
                     for (tile_idx, &mask) in self.dirty_tiles.iter().enumerate() {
-                        if mask & Self::OCCUPIED_TILE_MASK == 0 {
+                        if mask & EguiSoftwareRenderInner::OCCUPIED_TILE_MASK == 0 {
                             continue;
                         }
 
@@ -309,7 +356,8 @@ impl EguiSoftwareRender {
 
                         let canvas_row_offset = tile_row * TILE_SIZE;
 
-                        self.blit_tile(
+                        Self::blit_tile(
+                            canvas,
                             buffer_tile_row,
                             x_start,
                             y_start,
@@ -335,7 +383,7 @@ impl EguiSoftwareRender {
                 let x_end = (x_start + TILE_SIZE).min(width);
                 let y_end = (y_start + TILE_SIZE).min(height);
 
-                self.blit_tile(buffer, x_start, y_start, x_end, y_end, 0);
+                Self::blit_tile(canvas, buffer, x_start, y_start, x_end, y_end, 0);
             }
         }
 
@@ -346,7 +394,7 @@ impl EguiSoftwareRender {
     }
 
     fn blit_tile(
-        &self,
+        canvas: &BufferMutRef,
         buffer: &mut BufferMutRef,
         x_start: usize,
         y_start: usize,
@@ -357,7 +405,7 @@ impl EguiSoftwareRender {
         macro_rules! blit_tile_impl {
             ($color:ident) => {
                 for y in y_start..y_end {
-                    let src_row = self.canvas.get_span(x_start, x_end, y + canvas_row_offset);
+                    let src_row = canvas.get_span(x_start, x_end, y + canvas_row_offset);
                     let dst_row = &mut buffer.get_mut_span(x_start, x_end, y);
                     crate::$color::egui_blend_u8_slice(src_row, dst_row);
                 }
@@ -727,16 +775,12 @@ impl EguiSoftwareRender {
         }
     }
 
-    fn update_canvas_from_cached(&mut self) {
+    fn update_canvas_from_cached(&mut self, mut canvas: BufferMutRef) {
         #[cfg(feature = "raster_stats")]
         let start = std::time::Instant::now();
 
         let mut sorted_prim_cache = self.cached_primitives.values().collect::<Vec<_>>();
         sorted_prim_cache.sort_unstable_by_key(|prim| prim.z_order);
-
-        #[allow(unused_mut)]
-        let mut canvas =
-            BufferMutRef::new(&mut self.canvas.data, self.canvas.width, self.canvas.height);
 
         #[cfg(feature = "rayon")]
         {
@@ -994,46 +1038,46 @@ fn update_canvas_tile(
     }
 }
 
+pub trait CanvasBuffer<'a> {
+    fn buffer_mut_ref(&mut self) -> BufferMutRef<'_>;
+}
+pub trait Canvas: 'static {
+    /// returns true if wasn't already the given size
+    fn resize_and_clear(&mut self, width: usize, height: usize) -> bool;
+
+    type Buffer<'a>: CanvasBuffer<'a>;
+    fn buffer_mut<'a>(&'a mut self) -> Self::Buffer<'a>;
+}
+
 #[derive(Default)]
-struct Canvas {
+pub struct CanvasVec {
     data: Vec<[u8; 4]>,
     width: usize,
     height: usize,
-    width_extent: usize,
-    height_extent: usize,
 }
 
-impl Canvas {
-    fn clear(&mut self) {
-        self.data.iter_mut().for_each(|p| *p = [0; 4]);
-    }
-
+impl Canvas for CanvasVec {
     /// returns true if wasn't already the given size
-    fn resize(&mut self, width: usize, height: usize) -> bool {
+    fn resize_and_clear(&mut self, width: usize, height: usize) -> bool {
         if width != self.width || height != self.height {
+            self.data.clear();
             self.data.resize(width * height, [0; 4]);
             self.width = width;
             self.height = height;
-            self.width_extent = width - 1;
-            self.height_extent = height - 1;
             true
         } else {
             false
         }
     }
 
-    #[inline(always)]
-    pub fn get_range(&self, start: usize, end: usize, y: usize) -> Range<usize> {
-        let row_start = y * self.width;
-        let start = row_start + start;
-        let end = row_start + end;
-        start..end
+    type Buffer<'a> = &'a mut Self;
+    fn buffer_mut<'a>(&'a mut self) -> Self::Buffer<'a> {
+        self
     }
-
-    #[inline(always)]
-    pub fn get_span(&self, start: usize, end: usize, y: usize) -> &[[u8; 4]] {
-        let range = self.get_range(start, end, y);
-        &self.data[range]
+}
+impl<'a> CanvasBuffer<'a> for &'a mut CanvasVec {
+    fn buffer_mut_ref(&mut self) -> BufferMutRef<'_> {
+        BufferMutRef::new(&mut self.data, self.width, self.height)
     }
 }
 
@@ -1138,6 +1182,12 @@ impl<'a> BufferMutRef<'a> {
         let start = row_start + start;
         let end = row_start + end;
         start..end
+    }
+
+    #[inline(always)]
+    pub fn get_span(&self, start: usize, end: usize, y: usize) -> &[[u8; 4]] {
+        let range = self.get_range(start, end, y);
+        &self.data[range]
     }
 
     #[inline(always)]

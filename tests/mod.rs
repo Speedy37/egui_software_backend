@@ -1,7 +1,7 @@
 mod tests {
 
     use egui::{Vec2, vec2};
-    use egui_software_backend::{ColorFieldOrder, EguiSoftwareRender};
+    use egui_software_backend::{CanvasVec, ColorFieldOrder, EguiSoftwareRender};
     use image::{ImageBuffer, Rgba};
 
     use egui_kittest::HarnessBuilder;
@@ -47,10 +47,11 @@ mod tests {
                 for allow_raster_opt in [false, true] {
                     for convert_tris_to_rects in [false, true] {
                         // --- Render on CPU
-                        let egui_software_render = EguiSoftwareRender::new(ColorFieldOrder::Rgba)
-                            .with_allow_raster_opt(allow_raster_opt)
-                            .with_convert_tris_to_rects(convert_tris_to_rects)
-                            .with_caching(use_cache);
+                        let egui_software_render =
+                            EguiSoftwareRender::new(ColorFieldOrder::Rgba, CanvasVec::default())
+                                .with_allow_raster_opt(allow_raster_opt)
+                                .with_convert_tris_to_rects(convert_tris_to_rects)
+                                .with_caching(use_cache);
 
                         let mut harness = HarnessBuilder::default()
                             .with_size(RESOLUTION)

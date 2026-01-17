@@ -7,8 +7,8 @@ use crate::{BufferMutRef, EguiSoftwareRender};
 
 impl TestRenderer for EguiSoftwareRender {
     fn handle_delta(&mut self, delta: &TexturesDelta) {
-        self.set_textures(delta);
-        self.free_textures(delta);
+        self.inner.set_textures(delta);
+        self.inner.free_textures(delta);
     }
 
     fn render(

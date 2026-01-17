@@ -3,7 +3,7 @@
 use argh::FromArgs;
 use core::num::NonZeroU32;
 use egui_demo_lib::ColorTest;
-use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
+use egui_software_backend::{BufferMutRef, CanvasVec, ColorFieldOrder, EguiSoftwareRender};
 use std::rc::Rc;
 use std::time::Instant;
 use winit::event::{Event, WindowEvent};
@@ -44,10 +44,11 @@ fn main() {
 
     let mut egui_demo = egui_demo_lib::DemoWindows::default();
     let mut egui_color_test = ColorTest::default();
-    let mut egui_software_render = EguiSoftwareRender::new(ColorFieldOrder::Bgra)
-        .with_allow_raster_opt(!args.no_opt)
-        .with_convert_tris_to_rects(!args.no_rect)
-        .with_caching(!args.direct);
+    let mut egui_software_render =
+        EguiSoftwareRender::new(ColorFieldOrder::Bgra, CanvasVec::default())
+            .with_allow_raster_opt(!args.no_opt)
+            .with_convert_tris_to_rects(!args.no_rect)
+            .with_caching(!args.direct);
 
     let event_loop: EventLoop<()> = EventLoop::new().unwrap();
 

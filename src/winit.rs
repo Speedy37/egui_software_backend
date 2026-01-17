@@ -83,6 +83,55 @@ impl SoftwareBackendAppError {
     }
 }
 
+struct CanvasSoftBuffer {
+    surface: softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>,
+    width: usize,
+    height: usize,
+}
+
+struct CanvasSoftBufferBuffer<'a> {
+    buffer: softbuffer::Buffer<'a, OwnedDisplayHandle, Rc<Window>>,
+    width: usize,
+    height: usize,
+}
+
+impl crate::Canvas for CanvasSoftBuffer {
+    fn resize_and_clear(&mut self, width: usize, height: usize) -> bool {
+        if width != self.width || height != self.height {
+            self.surface
+                .resize(
+                    NonZeroU32::new(width as u32).unwrap_or(ONE_PIXEL),
+                    NonZeroU32::new(height as u32).unwrap_or(ONE_PIXEL),
+                )
+                .unwrap();
+            self.surface.buffer_mut().unwrap().fill(0); // clear
+            self.width = width;
+            self.height = height;
+            true
+        } else {
+            false
+        }
+    }
+
+    type Buffer<'a> = CanvasSoftBufferBuffer<'a>;
+    fn buffer_mut<'a>(&'a mut self) -> Self::Buffer<'a> {
+        CanvasSoftBufferBuffer {
+            buffer: self.surface.buffer_mut().unwrap(),
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+impl<'a> crate::CanvasBuffer<'a> for CanvasSoftBufferBuffer<'a> {
+    fn buffer_mut_ref(&mut self) -> BufferMutRef<'_> {
+        BufferMutRef::new(
+            bytemuck::cast_slice_mut(&mut self.buffer),
+            self.width,
+            self.height,
+        )
+    }
+}
+
 // Doing what clippy suggests would make it impossible for the compiler to optimize the layout of this enum, causing
 // state machine transitions to be more expensive!
 #[allow(clippy::large_enum_variant)]
@@ -114,7 +163,6 @@ struct ConfiguredAppState<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiAp
     /////////////////// END OF DANGER ZONE//////////////////////////////////////
     config: SoftwareBackendAppConfiguration,
     software_backend: SoftwareBackend,
-    renderer: EguiSoftwareRender,
     egui_app_factory: EguiAppFactory,
 }
 
@@ -129,7 +177,6 @@ struct WindowInitializedAppState<EguiApp: App, EguiAppFactory: FnMut(Context) ->
     /////////////////// END OF DANGER ZONE//////////////////////////////////////
     config: SoftwareBackendAppConfiguration,
     software_backend: SoftwareBackend,
-    renderer: EguiSoftwareRender,
     egui_app_factory: EguiAppFactory,
 }
 
@@ -139,13 +186,12 @@ struct RunningEguiAppState<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiA
     // If the fields are dropped in the wrong order. Other platforms are not affected by drop order.
     // Fields of a struct are dropped in declaration order. https://doc.rust-lang.org/reference/destructors.html
     egui_context: Context,
-    surface: softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>,
+    renderer: EguiSoftwareRender<CanvasSoftBuffer>,
     egui_winit: egui_winit::State,
     window: Rc<Window>,
     /////////////////// END OF DANGER ZONE//////////////////////////////////////
     config: SoftwareBackendAppConfiguration,
     software_backend: SoftwareBackend,
-    renderer: EguiSoftwareRender,
     egui_app_factory: EguiAppFactory,
     softbuffer_context: softbuffer::Context<OwnedDisplayHandle>,
     egui_app: EguiApp,
@@ -193,7 +239,6 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
         Ok(WindowInitializedAppState {
             config: self.config,
             software_backend: self.software_backend,
-            renderer: self.renderer,
             egui_context: self.egui_context,
             egui_app_factory: self.egui_app_factory,
             softbuffer_context: self.softbuffer_context,
@@ -212,6 +257,15 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
             .map_err(SoftwareBackendAppError::soft_buffer(
                 "softbuffer::Surface::new",
             ))?;
+        let surface = CanvasSoftBuffer {
+            surface,
+            width: 0,
+            height: 0,
+        };
+        let renderer = EguiSoftwareRender::new(ColorFieldOrder::Bgra, surface)
+            .with_allow_raster_opt(self.config.allow_raster_opt)
+            .with_convert_tris_to_rects(self.config.convert_tris_to_rects)
+            .with_caching(self.config.caching);
 
         let egui_winit = egui_winit::State::new(
             self.egui_context.clone(),
@@ -228,12 +282,11 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
 
         Ok(RunningEguiAppState {
             config: self.config,
-            renderer: self.renderer,
+            renderer,
             egui_context: self.egui_context,
             egui_app_factory: self.egui_app_factory,
             softbuffer_context: self.softbuffer_context,
             window: self.window,
-            surface,
             egui_winit,
             egui_app,
             fullscreen,
@@ -250,7 +303,6 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
     /// Create a new application.
     pub(crate) fn new(
         config: SoftwareBackendAppConfiguration,
-        renderer: EguiSoftwareRender,
         softbuffer_context: softbuffer::Context<OwnedDisplayHandle>,
         egui_app_factory: EguiAppFactory,
     ) -> Self {
@@ -260,7 +312,6 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
                 capture_frame_time: false,
                 last_frame_time: None,
             },
-            renderer,
             softbuffer_context,
             egui_context: Context::default(),
             egui_app_factory,
@@ -385,7 +436,6 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
         WindowInitializedAppState {
             config: self.config,
             software_backend: self.software_backend,
-            renderer: self.renderer,
             egui_context: self.egui_context,
             egui_app_factory: self.egui_app_factory,
             softbuffer_context: self.softbuffer_context,
@@ -429,12 +479,6 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
         match window_event {
             WindowEvent::RedrawRequested => {
                 let size = self.window.inner_size();
-                let width = NonZeroU32::new(size.width).unwrap_or(ONE_PIXEL);
-                let height = NonZeroU32::new(size.height).unwrap_or(ONE_PIXEL);
-
-                self.surface.resize(width, height).map_err(
-                    SoftwareBackendAppError::soft_buffer("softbuffer::Surface::resize"),
-                )?;
 
                 let mut raw_input = self.egui_winit.take_egui_input(self.window.deref());
 
@@ -664,32 +708,18 @@ impl<EguiApp: App, EguiAppFactory: FnMut(Context) -> EguiApp>
                     .egui_context
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let mut buffer =
-                    self.surface
-                        .buffer_mut()
-                        .map_err(SoftwareBackendAppError::soft_buffer(
-                            "softbuffer::Surface::buffer_mut",
-                        ))?;
-                buffer.fill(0); // CLEAR
-
-                let buffer_ref = &mut BufferMutRef::new(
-                    bytemuck::cast_slice_mut(&mut buffer),
-                    width.get() as usize,
-                    height.get() as usize,
-                );
-
-                self.renderer.render(
-                    buffer_ref,
+                let updated_canvas_buffer = self.renderer.render_to_canvas(
+                    size.width as usize,
+                    size.height as usize,
                     &clipped_primitives,
                     &full_output.textures_delta,
                     full_output.pixels_per_point,
                 );
-
-                buffer
-                    .present()
-                    .map_err(SoftwareBackendAppError::soft_buffer(
-                        "softbuffer::Buffer::present",
-                    ))?;
+                if let Some(updated_canvas_buffer) = updated_canvas_buffer {
+                    updated_canvas_buffer.buffer.present().map_err(
+                        SoftwareBackendAppError::soft_buffer("softbuffer::Buffer::present"),
+                    )?;
+                }
 
                 self.software_backend.last_frame_time = start.map(|a| a.elapsed());
             }
@@ -1062,11 +1092,6 @@ pub fn run_app_with_software_backend<T: App>(
     settings: SoftwareBackendAppConfiguration,
     egui_app_factory: impl FnMut(Context) -> T,
 ) -> Result<(), SoftwareBackendAppError> {
-    let egui_software_render = EguiSoftwareRender::new(ColorFieldOrder::Bgra)
-        .with_allow_raster_opt(settings.allow_raster_opt)
-        .with_convert_tris_to_rects(settings.convert_tris_to_rects)
-        .with_caching(settings.caching);
-
     let event_loop: EventLoop<()> =
         EventLoop::new().map_err(|e| SoftwareBackendAppError::EventLoop(Box::new(e)))?;
 
@@ -1074,12 +1099,7 @@ pub fn run_app_with_software_backend<T: App>(
         SoftwareBackendAppError::soft_buffer("softbuffer::Context::new"),
     )?;
 
-    let mut app = WinitAppStateMachine::new(
-        settings.clone(),
-        egui_software_render,
-        softbuffer_context,
-        egui_app_factory,
-    );
+    let mut app = WinitAppStateMachine::new(settings.clone(), softbuffer_context, egui_app_factory);
 
     if let Err(event_loop_error) = event_loop.run_app(&mut app) {
         if let WinitAppStateMachine::Dead(Some(app_err)) = app {
